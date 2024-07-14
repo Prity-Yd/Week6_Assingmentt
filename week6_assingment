@@ -1,0 +1,435 @@
+# Connect to Azure account
+Connect-AzAccount
+
+# Set variables
+$resourceGroupName = "YourResourceGroupName"
+$dataFactoryName = "YourDataFactoryName"
+$location = "EastUS"  # Replace with your desired location
+$azureSqlDatabaseConnectionString = "YourAzureSqlDatabaseConnectionString"
+$ftpServerName = "YourFtpServerName"
+$ftpUsername = "YourFtpUsername"
+$ftpPassword = "YourFtpPassword"
+$ftpFolderPath = "/path/to/source/files"
+$azureSqlTableName = "YourDestinationTableName"
+
+# Create a resource group
+New-AzResourceGroup -Name $resourceGroupName -Location $location
+
+# Create a data factory
+$dataFactory = Set-AzDataFactoryV2 -ResourceGroupName $resourceGroupName -Name $dataFactoryName -Location $location
+
+# Create a Self-hosted Integration Runtime
+$selfHostedIR = Set-AzDataFactoryV2IntegrationRuntime `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "SelfHostedIR" `
+    -Type SelfHosted
+
+# Get the auth key for the Self-hosted IR (you'll need this to register the IR on your local machine)
+$authKey = Get-AzDataFactoryV2IntegrationRuntimeKey `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "SelfHostedIR"
+
+Write-Host "Auth Key for Self-hosted IR: $($authKey.AuthKey1)"
+# Use this auth key to register the IR on your local machine
+
+# Create Azure SQL Database linked service
+$azureSqlLinkedService = @{
+    name = "AzureSqlDatabaseLinkedService"
+    properties = @{
+        type = "AzureSqlDatabase"
+        typeProperties = @{
+            connectionString = $azureSqlDatabaseConnectionString
+        }
+    }
+}
+
+Set-AzDataFactoryV2LinkedService `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "AzureSqlDatabaseLinkedService" `
+    -Properties $azureSqlLinkedService
+
+# Create FTP linked service
+$ftpLinkedService = @{
+    name = "FtpLinkedService"
+    properties = @{
+        type = "FtpServer"
+        typeProperties = @{
+            host = $ftpServerName
+            userName = $ftpUsername
+            password = @{type = "SecureString"; value = $ftpPassword}
+        }
+        connectVia = @{
+            referenceName = "SelfHostedIR"
+            type = "IntegrationRuntimeReference"
+        }
+    }
+}
+
+Set-AzDataFactoryV2LinkedService `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "FtpLinkedService" `
+    -Properties $ftpLinkedService
+
+# Create FTP dataset
+$ftpDataset = @{
+    name = "FtpDataset"
+    properties = @{
+        type = "DelimitedText"
+        typeProperties = @{
+            location = @{
+                type = "FtpServerLocation"
+                folderPath = $ftpFolderPath
+            }
+            columnDelimiter = ","
+            firstRowAsHeader = $true
+        }
+        linkedServiceName = @{
+            referenceName = "FtpLinkedService"
+            type = "LinkedServiceReference"
+        }
+    }
+}
+
+Set-AzDataFactoryV2Dataset `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "FtpDataset" `
+    -Properties $ftpDataset
+
+# Create Azure SQL Database dataset
+$azureSqlDataset = @{
+    name = "AzureSqlDataset"
+    properties = @{
+        type = "AzureSqlTable"
+        typeProperties = @{
+            tableName = $azureSqlTableName
+        }
+        linkedServiceName = @{
+            referenceName = "AzureSqlDatabaseLinkedService"
+            type = "LinkedServiceReference"
+        }
+    }
+}
+
+Set-AzDataFactoryV2Dataset `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "AzureSqlDataset" `
+    -Properties $azureSqlDataset
+
+# Create pipeline
+$pipeline = @{
+    name = "FtpToAzureSqlPipeline"
+    properties = @{
+        activities = @(
+            @{
+                name = "CopyFromFtpToAzureSql"
+                type = "Copy"
+                inputs = @(
+                    @{
+                        referenceName = "FtpDataset"
+                        type = "DatasetReference"
+                    }
+                )
+                outputs = @(
+                    @{
+                        referenceName = "AzureSqlDataset"
+                        type = "DatasetReference"
+                    }
+                )
+                typeProperties = @{
+                    source = @{type = "DelimitedTextSource"}
+                    sink = @{type = "AzureSqlSink"}
+                }
+            }
+        )
+    }
+}
+
+Set-AzDataFactoryV2Pipeline `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "FtpToAzureSqlPipeline" `
+    -Properties $pipeline
+
+# Create daily trigger
+$dailyTrigger = @{
+    name = "DailyTrigger"
+    properties = @{
+        type = "ScheduleTrigger"
+        recurrence = @{
+            frequency = "Day"
+            interval = 1
+            startTime = "2024-07-15T00:00:00Z"
+            timeZone = "UTC"
+        }
+        pipelines = @(
+            @{
+                pipelineReference = @{
+                    referenceName = "FtpToAzureSqlPipeline"
+                    type = "PipelineReference"
+                }
+            }
+        )
+    }
+}
+
+Set-AzDataFactoryV2Trigger `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "DailyTrigger" `
+    -Properties $dailyTrigger
+
+# Create last Saturday of the month trigger
+$lastSaturdayTrigger = @{
+    name = "LastSaturdayTrigger"
+    properties = @{
+        type = "ScheduleTrigger"
+        recurrence = @{
+            frequency = "Month"
+            interval = 1
+            schedule = @{
+                weekDays = @("Saturday")
+                weekOfMonth = @("Last")
+            }
+            startTime = "2024-07-27T00:00:00Z"
+            timeZone = "UTC"
+        }
+        pipelines = @(
+            @{
+                pipelineReference = @{
+                    referenceName = "FtpToAzureSqlPipeline"
+                    type = "PipelineReference"
+                }
+            }
+        )
+    }
+}
+
+Set-AzDataFactoryV2Trigger `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "LastSaturdayTrigger" `
+    -Properties $lastSaturdayTrigger
+
+# Start the triggers
+Start-AzDataFactoryV2Trigger `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "DailyTrigger"
+
+Start-AzDataFactoryV2Trigger `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "LastSaturdayTrigger"
+
+
+
+
+# ... (previous code remains the same)
+
+# Create a stored procedure to update the last processed date
+$updateLastProcessedDateProcedure = @"
+CREATE PROCEDURE [dbo].[usp_UpdateLastProcessedDate]
+    @TableName NVARCHAR(128),
+    @LastProcessedDate DATETIME
+AS
+BEGIN
+    IF EXISTS (SELECT 1 FROM [dbo].[ETLControl] WHERE TableName = @TableName)
+        UPDATE [dbo].[ETLControl]
+        SET LastProcessedDate = @LastProcessedDate
+        WHERE TableName = @TableName
+    ELSE
+        INSERT INTO [dbo].[ETLControl] (TableName, LastProcessedDate)
+        VALUES (@TableName, @LastProcessedDate)
+END
+"@
+
+# Execute the stored procedure creation script on your Azure SQL Database
+
+# Create a dataset for the ETLControl table
+$etlControlDataset = @{
+    name = "ETLControlDataset"
+    properties = @{
+        type = "AzureSqlTable"
+        typeProperties = @{
+            tableName = "ETLControl"
+        }
+        linkedServiceName = @{
+            referenceName = "AzureSqlDatabaseLinkedService"
+            type = "LinkedServiceReference"
+        }
+    }
+}
+
+Set-AzDataFactoryV2Dataset `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "ETLControlDataset" `
+    -Properties $etlControlDataset
+
+# Create an Azure Function to send failure notifications
+# (You'll need to create this function in Azure and set up the linked service)
+
+$azureFunctionLinkedService = @{
+    name = "AzureFunctionLinkedService"
+    properties = @{
+        type = "AzureFunction"
+        typeProperties = @{
+            functionAppUrl = "https://yourfunctionapp.azurewebsites.net"
+            functionKey = @{
+                type = "SecureString"
+                value = "YourFunctionKeyHere"
+            }
+        }
+    }
+}
+
+Set-AzDataFactoryV2LinkedService `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "AzureFunctionLinkedService" `
+    -Properties $azureFunctionLinkedService
+
+# Create the enhanced pipeline
+$enhancedPipeline = @{
+    name = "EnhancedFtpToAzureSqlPipeline"
+    properties = @{
+        activities = @(
+            @{
+                name = "LookupLastProcessedDate"
+                type = "Lookup"
+                typeProperties = @{
+                    source = @{
+                        type = "AzureSqlSource"
+                        sqlReaderQuery = "SELECT LastProcessedDate FROM ETLControl WHERE TableName = '$azureSqlTableName'"
+                    }
+                    dataset = @{
+                        referenceName = "ETLControlDataset"
+                        type = "DatasetReference"
+                    }
+                }
+            },
+            @{
+                name = "FilterFiles"
+                type = "Filter"
+                dependsOn = @(
+                    @{
+                        activity = "LookupLastProcessedDate"
+                        dependencyConditions = @("Succeeded")
+                    }
+                )
+                typeProperties = @{
+                    items = @{
+                        value = "@activity('LookupFiles').output.files"
+                    }
+                    condition = @{
+                        value = "@greaterOrEquals(item().lastModified,activity('LookupLastProcessedDate').output.firstRow.LastProcessedDate)"
+                    }
+                }
+            },
+            @{
+                name = "CopyFromFtpToAzureSql"
+                type = "Copy"
+                dependsOn = @(
+                    @{
+                        activity = "FilterFiles"
+                        dependencyConditions = @("Succeeded")
+                    }
+                )
+                inputs = @(
+                    @{
+                        referenceName = "FtpDataset"
+                        type = "DatasetReference"
+                    }
+                )
+                outputs = @(
+                    @{
+                        referenceName = "AzureSqlDataset"
+                        type = "DatasetReference"
+                    }
+                )
+                typeProperties = @{
+                    source = @{type = "DelimitedTextSource"}
+                    sink = @{type = "AzureSqlSink"}
+                }
+            },
+            @{
+                name = "UpdateLastProcessedDate"
+                type = "SqlServerStoredProcedure"
+                dependsOn = @(
+                    @{
+                        activity = "CopyFromFtpToAzureSql"
+                        dependencyConditions = @("Succeeded")
+                    }
+                )
+                typeProperties = @{
+                    storedProcedureName = "[dbo].[usp_UpdateLastProcessedDate]"
+                    storedProcedureParameters = @{
+                        TableName = @{value = $azureSqlTableName}
+                        LastProcessedDate = @{value = "@utcnow()"}
+                    }
+                }
+                linkedServiceName = @{
+                    referenceName = "AzureSqlDatabaseLinkedService"
+                    type = "LinkedServiceReference"
+                }
+            },
+            @{
+                name = "FailureNotification"
+                type = "AzureFunctionActivity"
+                dependsOn = @(
+                    @{
+                        activity = "CopyFromFtpToAzureSql"
+                        dependencyConditions = @("Failed")
+                    }
+                )
+                typeProperties = @{
+                    functionName = "SendFailureNotification"
+                    method = "POST"
+                }
+                linkedServiceName = @{
+                    referenceName = "AzureFunctionLinkedService"
+                    type = "LinkedServiceReference"
+                }
+            }
+        )
+    }
+}
+
+Set-AzDataFactoryV2Pipeline `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "EnhancedFtpToAzureSqlPipeline" `
+    -Properties $enhancedPipeline
+
+# Update triggers to use the new pipeline
+$dailyTrigger.properties.pipelines[0].pipelineReference.referenceName = "EnhancedFtpToAzureSqlPipeline"
+$lastSaturdayTrigger.properties.pipelines[0].pipelineReference.referenceName = "EnhancedFtpToAzureSqlPipeline"
+
+Set-AzDataFactoryV2Trigger `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "DailyTrigger" `
+    -Properties $dailyTrigger
+
+Set-AzDataFactoryV2Trigger `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "LastSaturdayTrigger" `
+    -Properties $lastSaturdayTrigger
+
+# Start the triggers (if not already started)
+Start-AzDataFactoryV2Trigger `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "DailyTrigger"
+
+Start-AzDataFactoryV2Trigger `
+    -ResourceGroupName $resourceGroupName `
+    -DataFactoryName $dataFactoryName `
+    -Name "LastSaturdayTrigger"
